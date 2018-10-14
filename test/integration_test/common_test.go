@@ -17,6 +17,8 @@ import (
 	"github.com/sirupsen/logrus"
 	"github.com/skyrings/skyring-common/tools/uuid"
 	"github.com/stretchr/testify/require"
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/tools/clientcmd"
 )
 
 const (
@@ -34,6 +36,7 @@ var nodeDriver node.Driver
 var schedulerDriver scheduler.Driver
 var volumeDriver volume.Driver
 var storkVolumeDriver storkdriver.Driver
+var storageToken string
 
 var snapshotScaleCount int
 
@@ -66,6 +69,10 @@ func setup(t *testing.T) {
 
 	err = volumeDriver.Init(schedulerDriverName, nodeDriverName)
 	require.NoError(t, err, "Error initializing volume driver %v", volumeDriverName)
+
+	destKubeConfig := "/opt/kubeconfig"
+	storageToken, err = getStorageToken(destKubeConfig)
+	logrus.Info("Storage tocken of destination cluster is %s", storageToken)
 }
 
 func TestMain(t *testing.T) {
@@ -105,6 +112,42 @@ func getVolumeNames(t *testing.T, ctx *scheduler.Context) []string {
 		volumes = append(volumes, vol)
 	}
 	return volumes
+}
+
+func getStorageToken(destKubeConfig string) (string, error) {
+
+	config, err := clientcmd.BuildConfigFromFlags("", destKubeConfig)
+	if err != nil {
+		return "", err
+	}
+	kubeclient, err := kubernetes.NewForConfig(config)
+	if err != nil {
+		return "", err
+	}
+
+	nodes, err := kubeclient.CoreV1().Nodes().List(meta_v1.ListOptions{})
+	if err != nil {
+		return "", err
+	}
+	for _, n := range nodes.Items {
+
+		_, ok := n.Labels["node-role.kubernetes.io/master"]
+		logrus.Info("Node is master %v", ok)
+		if !ok {
+			sshNode := &node.Node{
+				Name:      n.Name,
+				Addresses: k.getAddressesForNode(n),
+			}
+
+			logrus.Info("torpedo worker node %v", sshNode)
+			out, err := nodeDriver.RunCommand(sshNode, "pxctl storage token")
+			logrus.Info("pxctl token %v", out)
+			return out, nil
+		}
+
+	}
+
+	return "", nil
 }
 
 func verifyScheduledNode(t *testing.T, appNode node.Node, volumes []string) {

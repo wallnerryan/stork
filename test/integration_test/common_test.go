@@ -4,10 +4,15 @@ package integrationtest
 
 import (
 	"flag"
+	"fmt"
+	"html/template"
+	"os"
 	"testing"
 
 	storkdriver "github.com/libopenstorage/stork/drivers/volume"
 	_ "github.com/libopenstorage/stork/drivers/volume/portworx"
+	"github.com/portworx/sched-ops/k8s"
+	"github.com/portworx/spawn/log"
 	"github.com/portworx/torpedo/drivers/node"
 	_ "github.com/portworx/torpedo/drivers/node/ssh"
 	"github.com/portworx/torpedo/drivers/scheduler"
@@ -17,8 +22,7 @@ import (
 	"github.com/sirupsen/logrus"
 	"github.com/skyrings/skyring-common/tools/uuid"
 	"github.com/stretchr/testify/require"
-	"k8s.io/client-go/kubernetes"
-	"k8s.io/client-go/tools/clientcmd"
+	yaml "gopkg.in/yaml.v2"
 )
 
 const (
@@ -70,9 +74,6 @@ func setup(t *testing.T) {
 	err = volumeDriver.Init(schedulerDriverName, nodeDriverName)
 	require.NoError(t, err, "Error initializing volume driver %v", volumeDriverName)
 
-	destKubeConfig := "/opt/kubeconfig"
-	storageToken, err = getStorageToken(destKubeConfig)
-	logrus.Info("Storage tocken of destination cluster is %s", storageToken)
 }
 
 func TestMain(t *testing.T) {
@@ -114,40 +115,63 @@ func getVolumeNames(t *testing.T, ctx *scheduler.Context) []string {
 	return volumes
 }
 
-func getStorageToken(destKubeConfig string) (string, error) {
-
-	config, err := clientcmd.BuildConfigFromFlags("", destKubeConfig)
+// createClusterPairSpec from specification
+func CreateClusterPairSpec(req ClusterPairRequest) error {
+	// parseKubeConfig file from configMap
+	kubeSpec, err := parseKubeConfig(req.ConfigMapName)
 	if err != nil {
-		return "", err
+		return err
 	}
-	kubeclient, err := kubernetes.NewForConfig(config)
+
+	// CreateClusterPair spec
+	clusterPair := &ClusterPair{
+		PairName:             req.PairName,
+		RemotePxIP:           req.PxIP,
+		RemotePxPort:         req.PxPort,
+		RemotePxToken:        req.PxClusterToken,
+		RemoteKubeServer:     kubeSpec.ClusterInfo[0].Cluster["server"],
+		RemoteConfigAuthData: kubeSpec.ClusterInfo[0].Cluster["certificate-authority-data"],
+		RemoteConfigKeyData:  kubeSpec.UserInfo[0].User["client-certificate-data"],
+		RemoteConfigCertData: kubeSpec.UserInfo[0].User["client-key-data"],
+	}
+
+	// Create pair file
+	t := template.New("clusterPair")
+	t.Parse(clusterPairSpec)
+
+	//This should be path of clusterpair yaml
+	f, err := os.Create(req.SpecDirPath + pairFileName)
 	if err != nil {
-		return "", err
+		log.Error("Unable to create clusterPair.yaml")
+		return err
 	}
 
-	nodes, err := kubeclient.CoreV1().Nodes().List(meta_v1.ListOptions{})
+	if err := t.Execute(f, clusterPair); err != nil {
+		log.Error("Couldn't write to ocp.ini")
+		return err
+	}
+
+	return nil
+}
+
+func parseKubeConfig(configObject string) (*KubeConfigSpec, error) {
+	var spec *KubeConfigSpec
+	cm, err := k8s.Instance().GetConfigMap(configObject, "kube-system")
 	if err != nil {
-		return "", err
+		logrus.Info("Error reading config map %v", err)
+		return nil, err
 	}
-	for _, n := range nodes.Items {
-
-		_, ok := n.Labels["node-role.kubernetes.io/master"]
-		logrus.Info("Node is master %v", ok)
-		if !ok {
-			sshNode := &node.Node{
-				Name:      n.Name,
-				Addresses: k.getAddressesForNode(n),
-			}
-
-			logrus.Info("torpedo worker node %v", sshNode)
-			out, err := nodeDriver.RunCommand(sshNode, "pxctl storage token")
-			logrus.Info("pxctl token %v", out)
-			return out, nil
-		}
-
+	status := cm.Data[remoteConfig]
+	if len(status) == 0 {
+		logrus.Info("found empty failure status for key:remoteConifg in config map")
+		return nil, fmt.Errorf("Empty kubeconfig for remote cluster")
 	}
-
-	return "", nil
+	err = yaml.Unmarshal([]byte(status), &spec)
+	if err != nil {
+		fmt.Println("Error parsing kubeconfig file", err)
+		return nil, err
+	}
+	return spec, nil
 }
 
 func verifyScheduledNode(t *testing.T, appNode node.Node, volumes []string) {

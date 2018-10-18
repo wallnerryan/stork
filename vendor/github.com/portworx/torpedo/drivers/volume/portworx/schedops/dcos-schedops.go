@@ -21,6 +21,10 @@ func (d *dcosSchedOps) ValidateAddLabels(replicaNodes []api.Node, vol *api.Volum
 	return nil
 }
 
+// GetStorageToken returns cluster pair token required for Cloud Migration
+func (d *dcosSchedOps) GetStorageToken(destKubeConfig string) (string, error) {
+	return "", nil
+}
 func (d *dcosSchedOps) ValidateRemoveLabels(vol *volume.Volume) error {
 	// We do not have labels in DC/OS currently
 	return nil

@@ -44,6 +44,8 @@ const (
 	dcosNodeType           = "kubernetes.dcos.io/node-type"
 	talismanServiceAccount = "talisman-account"
 	talismanImage          = "portworx/talisman:latest"
+	pxPath                 = "/opt/pwx/bin/pxctl "
+	tokenCmd               = "cluster token show "
 )
 
 const (
@@ -82,6 +84,56 @@ func (k *k8sSchedOps) ValidateOnNode(n node.Node) error {
 		Type:      "Function",
 		Operation: "ValidateOnNode",
 	}
+}
+
+// GetStorageToken returns cluster pair token required for Cloud Migration
+func (k *k8sSchedOps) GetStorageToken(destKubeConfig string) (string, error) {
+	// get schd-ops/k8s instance of destination cluster
+	destClient := k8s.NewInstance(destKubeConfig)
+	if destClient == nil {
+		return "", fmt.Errorf("Unable to get new instance")
+	}
+
+	nodes, err := destClient.GetNodes()
+	if err != nil {
+		return "", err
+	}
+	var workerNode corev1.Node
+	// TODO(ram-infrac) :find px node, right now it's assumed that px is installed
+	// on all worker node
+	for _, node := range nodes.Items {
+		if !destClient.IsNodeMaster(node) {
+			workerNode = node
+			break
+		}
+	}
+
+	logrus.Info("worker node on remote :", workerNode.Name)
+	pxPods, err := destClient.GetPodsByNode(workerNode.Name, PXNamespace)
+	if err != nil {
+		return "", err
+	}
+	var pxPod corev1.Pod
+	for _, pod := range pxPods.Items {
+		if pod.Labels["name"] == PXDaemonSet {
+			pxPod = pod
+			break
+		}
+	}
+	// using first pod to get px token
+	logrus.Info("PX Pod seletcted", pxPod.Name)
+
+	cmdSplit := []string{"/opt/pwx/bin/pxctl", " cluster token show"}
+	logrus.Info("Executing pxctl command:", cmdSplit)
+	// Didn't understand 3rd argument ContainerName
+	out, err := destClient.RunCommandInPod(cmdSplit, pxPod.Name, "", PXNamespace)
+	if err != nil {
+		return out, err
+	}
+
+	logrus.Info("pxctl token received: ", out)
+	return "53f94470b8205820bd3bdaf5a8f09f9b18a948058c56f8344b6429f5b3e58c6d60b0909e55ba51cc9ab2d6c88579f27f85dddf5998c4ab3169c75ec18ee14d64", nil
+	//strings.Fields(out)[2], nil
 }
 
 func (k *k8sSchedOps) ValidateAddLabels(replicaNodes []api.Node, vol *api.Volume) error {

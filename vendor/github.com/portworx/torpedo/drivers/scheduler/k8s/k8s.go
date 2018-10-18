@@ -206,8 +206,9 @@ func validateSpec(in interface{}) (interface{}, error) {
 		return specObj, nil
 	} else if specObj, ok := in.(*v1.Pod); ok {
 		return specObj, nil
+	} else if specObj, ok := in.(*stork_api.ClusterPair); ok {
+		return specObj, nil
 	}
-
 	return nil, fmt.Errorf("Unsupported object: %v", reflect.TypeOf(in))
 }
 
@@ -1282,6 +1283,57 @@ func (k *k8s) Describe(ctx *scheduler.Context) (string, error) {
 		}
 	}
 	return buf.String(), nil
+}
+
+func (k *k8s) CreateCRDObjects(pathCRDSpec string) (*scheduler.Context, error) {
+	// Add Spec reading login somewhere else
+	file, err := os.Open(pathCRDSpec)
+	if err != nil {
+		logrus.Info("error reading file", err)
+		return nil, err
+	}
+	defer file.Close()
+
+	reader := bufio.NewReader(file)
+	specReader := yaml.NewYAMLReader(reader)
+
+	var specObj interface{}
+	for {
+		specContents, err := specReader.Read()
+		if err == io.EOF {
+			break
+		}
+
+		if len(bytes.TrimSpace(specContents)) > 0 {
+			logrus.Info("file content %s", string(specContents))
+			obj, err := decodeSpec(specContents)
+			if err != nil {
+				logrus.Warnf("Error decoding spec from %v: %v", pathCRDSpec, err)
+				return nil, err
+			}
+
+			specObj, err = validateSpec(obj)
+			if err != nil {
+				logrus.Warnf("Error parsing spec from %v: %v", pathCRDSpec, err)
+				return nil, err
+			}
+
+		}
+	}
+	logrus.Info("apply spec")
+	// TODO: add timer to wait for status success/fail
+	k8sOps := k8s_ops.Instance()
+	if obj, ok := specObj.(*stork_api.ClusterPair); ok {
+		err = k8sOps.CreateClusterPair(obj)
+		if err == nil {
+			logrus.Info("Get status ", obj.Name)
+			stat, _ := k8sOps.GetClusterPair(obj.Name)
+			logrus.Info("Cluster Pauir stat", stat.Status)
+
+		}
+	}
+	logrus.Info("Cluster Pair Created Sucessuflly", err)
+	return nil, nil
 }
 
 func (k *k8s) ScaleApplication(ctx *scheduler.Context, scaleFactorMap map[string]int32) error {

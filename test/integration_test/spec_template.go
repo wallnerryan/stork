@@ -1,9 +1,10 @@
 package integrationtest
 
 const (
-	remotePairName = "remoteClusterPair"
-	remoteConfig   = "remoteConfigMap"
+	remotePairName = "remoteclusterpair"
+	remoteConfig   = "remoteconfigmap"
 	pairFileName   = "cluster-pair.yml"
+	remoteFilePath = "/opt/kubeconfig"
 )
 
 // ClusterPairRequest to create new clusterpair spec file
@@ -32,7 +33,7 @@ type ClusterInfo struct {
 // ContextInfo of kubeConfig file
 type ContextInfo struct {
 	Name    string
-	Context map[string]string `yaml:"context, omitempty"`
+	Context map[string]string `yaml:"context,omitempty"`
 }
 
 // UserInfo in kubeconfig file
@@ -61,12 +62,12 @@ spec:
   options:
     ip: {{ .RemotePxIP }}
     token: {{ .RemotePxToken }} 
-    port: {{ .RemotePxPort }}
+    port: "{{ .RemotePxPort }}"
   config:
     clusters:
       kubernetes:
         certificate-authority-data: {{ .RemoteConfigAuthData }}
-        server: {{.RemoteKubeServer}}:
+        server: {{.RemoteKubeServer}}
     contexts:
       kubernetes-admin@kubernetes:
         cluster: kubernetes
@@ -75,5 +76,4 @@ spec:
     users:
       kubernetes-admin:
         client-certificate-data: {{ .RemoteConfigCertData }}
-		client-key-data: {{ .RemoteConfigKeyData }}
-`
+        client-key-data: {{ .RemoteConfigKeyData }}`

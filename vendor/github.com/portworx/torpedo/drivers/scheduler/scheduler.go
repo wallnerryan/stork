@@ -85,6 +85,9 @@ type Driver interface {
 
 	// Get a map of current applications to their new scales, based on "factor"
 	GetScaleFactorMap(*Context) (map[string]int32, error)
+
+	// CreateCRDObjects from spec path provided
+	CreateCRDObjects(pathCRDSpec string) (*Context, error)
 }
 
 var (

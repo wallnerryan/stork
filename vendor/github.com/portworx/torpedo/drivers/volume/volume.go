@@ -93,6 +93,8 @@ type Driver interface {
 
 	// GetMinReplicationFactor returns the min supported repl factor of a volume
 	GetMinReplicationFactor() int64
+
+	GetStorageInfo() (string, error)
 }
 
 var (

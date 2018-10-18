@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"html/template"
+	"io/ioutil"
 	"os"
 	"testing"
 
@@ -81,10 +82,11 @@ func TestMain(t *testing.T) {
 	if passed := t.Run("setup", setup); !passed {
 		t.FailNow()
 	}
-	t.Run("Extender", testExtender)
-	t.Run("HealthMonitor", testHealthMonitor)
-	t.Run("Snapshot", testSnapshot)
-	t.Run("CmdExecutor", asyncPodCommandTest)
+	t.Run("testBasicCloudMigartion", testBasicCloudMigration)
+	/*	t.Run("Extender", testExtender)
+		t.Run("HealthMonitor", testHealthMonitor)
+		t.Run("Snapshot", testSnapshot)
+		t.Run("CmdExecutor", asyncPodCommandTest)*/
 }
 
 func generateInstanceID(t *testing.T, testName string) string {
@@ -150,8 +152,24 @@ func CreateClusterPairSpec(req ClusterPairRequest) error {
 		log.Error("Couldn't write to ocp.ini")
 		return err
 	}
-
+	logrus.Info("Created cclusterpair file")
 	return nil
+}
+
+func dumpRemoteKubeConfig(configObject string) error {
+
+	cm, err := k8s.Instance().GetConfigMap(configObject, "kube-system")
+	if err != nil {
+		logrus.Info("Error reading config map %v", err)
+		return err
+	}
+	status := cm.Data["kubeconfig"]
+	if len(status) == 0 {
+		logrus.Info("found empty failure status for key:remoteConifg in config map")
+		return fmt.Errorf("Empty kubeconfig for remote cluster")
+	}
+
+	return ioutil.WriteFile(remoteFilePath, []byte(status), 0644)
 }
 
 func parseKubeConfig(configObject string) (*KubeConfigSpec, error) {
@@ -161,7 +179,7 @@ func parseKubeConfig(configObject string) (*KubeConfigSpec, error) {
 		logrus.Info("Error reading config map %v", err)
 		return nil, err
 	}
-	status := cm.Data[remoteConfig]
+	status := cm.Data["kubeconfig"]
 	if len(status) == 0 {
 		logrus.Info("found empty failure status for key:remoteConifg in config map")
 		return nil, fmt.Errorf("Empty kubeconfig for remote cluster")

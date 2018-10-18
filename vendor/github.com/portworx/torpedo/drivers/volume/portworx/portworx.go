@@ -959,6 +959,12 @@ func (d *portworx) UpgradeDriver(version string) error {
 	return nil
 }
 
+func (d *portworx) GetStorageInfo() (string, error) {
+	token, err := d.schedOps.GetStorageToken("/opt/kubeconfig")
+
+	return token, err
+}
+
 func (d *portworx) getVolDriver() volume.VolumeDriver {
 	if d.refreshEndpoint {
 		d.setDriver()

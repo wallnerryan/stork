@@ -257,6 +257,7 @@ type GroupVolumeSnapshotList struct {
 
 // GroupVolumeSnapshotStatus is status for the group snapshot
 type GroupVolumeSnapshotStatus struct {
+	Stage           GroupVolumeSnapshotStageType  `json:"stage"`
 	Status          GroupVolumeSnapshotStatusType `json:"status"`
 	VolumeSnapshots []*crdv1.VolumeSnapshot       `json:"volumeSnapshots"`
 }
@@ -275,4 +276,18 @@ const (
 	GroupSnapshotFailed GroupVolumeSnapshotStatusType = "Failed"
 	// GroupSnapshotSuccessful is when the group snapshot has succeeded
 	GroupSnapshotSuccessful GroupVolumeSnapshotStatusType = "Successful"
+)
+
+// GroupVolumeSnapshotStageType is the stage of the group snapshot
+type GroupVolumeSnapshotStageType string
+
+const (
+	// GroupSnapshotStagePreSnapshot is when the pre-snapshot rule is executing for the group snapshot
+	GroupSnapshotStagePreSnapshot GroupVolumeSnapshotStageType = "PreSnapshot"
+	// GroupSnapshotStageSnapshot is when the snapshots are being taken for the group snapshot
+	GroupSnapshotStageSnapshot GroupVolumeSnapshotStageType = "Snapshot"
+	// GroupSnapshotStagePostSnapshot is when the post-snapshot rule is executing for the group snapshot
+	GroupSnapshotStagePostSnapshot GroupVolumeSnapshotStageType = "PostSnapshot"
+	// GroupSnapshotStageFinal is when all stages are done for the group snapshot
+	GroupSnapshotStageFinal GroupVolumeSnapshotStageType = "Final"
 )

@@ -18,7 +18,7 @@ import (
 	"github.com/sirupsen/logrus"
 	apps_api "k8s.io/api/apps/v1beta2"
 	batch_v1 "k8s.io/api/batch/v1"
-	"k8s.io/api/core/v1"
+	v1 "k8s.io/api/core/v1"
 	rbac_v1 "k8s.io/api/rbac/v1"
 	storage_api "k8s.io/api/storage/v1"
 	apiextensionsv1beta1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1beta1"
@@ -33,6 +33,7 @@ import (
 	"k8s.io/apimachinery/pkg/selection"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/wait"
+	"k8s.io/apimachinery/pkg/version"
 	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
@@ -80,8 +81,12 @@ type Ops interface {
 	ClusterPairOps
 	MigrationOps
 	ObjectOps
+	GetVersion() (*version.Info, error)
 	SetConfig(config *rest.Config)
 	SetClient(client kubernetes.Interface, snapClient rest.Interface, storkClient storkclientset.Interface, apiExtensionClient apiextensionsclient.Interface, dynamicInterface dynamic.Interface)
+
+	// private methods for unit tests
+	privateMethods
 }
 
 // EventOps is an interface to put and get k8s events
@@ -461,10 +466,17 @@ type ObjectOps interface {
 	UpdateObject(object runtime.Object) (runtime.Object, error)
 }
 
+type privateMethods interface {
+	initK8sClient() error
+}
+
 // CustomResource is for creating a Kubernetes TPR/CRD
 type CustomResource struct {
 	// Name of the custom resource
 	Name string
+
+	// ShortNames are short names for the resource.  It must be all lowercase.
+	ShortNames []string
 
 	// Plural of the custom resource in plural
 	Plural string
@@ -552,6 +564,14 @@ func (k *k8sOps) initK8sClient() error {
 
 	}
 	return nil
+}
+
+func (k *k8sOps) GetVersion() (*version.Info, error) {
+	if err := k.initK8sClient(); err != nil {
+		return nil, err
+	}
+
+	return k.client.Discovery().ServerVersion()
 }
 
 // Namespace APIs - BEGIN
@@ -2988,6 +3008,10 @@ func (k *k8sOps) ListEvents(namespace string, opts meta_v1.ListOptions) (*v1.Eve
 
 // CRD APIs - BEGIN
 func (k *k8sOps) CreateCRD(resource CustomResource) error {
+	if err := k.initK8sClient(); err != nil {
+		return err
+	}
+
 	crdName := fmt.Sprintf("%s.%s", resource.Plural, resource.Group)
 	crd := &apiextensionsv1beta1.CustomResourceDefinition{
 		ObjectMeta: meta_v1.ObjectMeta{
@@ -2998,9 +3022,10 @@ func (k *k8sOps) CreateCRD(resource CustomResource) error {
 			Version: resource.Version,
 			Scope:   resource.Scope,
 			Names: apiextensionsv1beta1.CustomResourceDefinitionNames{
-				Singular: resource.Name,
-				Plural:   resource.Plural,
-				Kind:     resource.Kind,
+				Singular:   resource.Name,
+				Plural:     resource.Plural,
+				Kind:       resource.Kind,
+				ShortNames: resource.ShortNames,
 			},
 		},
 	}
@@ -3014,6 +3039,10 @@ func (k *k8sOps) CreateCRD(resource CustomResource) error {
 }
 
 func (k *k8sOps) ValidateCRD(resource CustomResource, timeout, retryInterval time.Duration) error {
+	if err := k.initK8sClient(); err != nil {
+		return err
+	}
+
 	crdName := fmt.Sprintf("%s.%s", resource.Plural, resource.Group)
 	return wait.Poll(timeout, retryInterval, func() (bool, error) {
 		crd, err := k.apiExtensionClient.ApiextensionsV1beta1().CustomResourceDefinitions().Get(crdName, meta_v1.GetOptions{})

@@ -15,6 +15,7 @@ import (
 	stork_api "github.com/libopenstorage/stork/pkg/apis/stork/v1alpha1"
 	"github.com/libopenstorage/stork/pkg/controller"
 	"github.com/libopenstorage/stork/pkg/log"
+	"github.com/libopenstorage/stork/pkg/rule"
 	"github.com/operator-framework/operator-sdk/pkg/sdk"
 	"github.com/portworx/sched-ops/k8s"
 	"github.com/sirupsen/logrus"
@@ -81,6 +82,11 @@ func (m *MigrationController) Init(migrationAdminNamespace string) error {
 	}
 
 	m.migrationAdminNamespace = migrationAdminNamespace
+	if err := m.performRuleRecovery(); err != nil {
+		logrus.Errorf("Failed to perform recovery for migration rules: %v", err)
+		return err
+	}
+
 	return controller.Register(
 		&schema.GroupVersionKind{
 			Group:   stork.GroupName,
@@ -90,6 +96,35 @@ func (m *MigrationController) Init(migrationAdminNamespace string) error {
 		"",
 		resyncPeriod,
 		m)
+}
+
+func setKind(snap *stork_api.Migration) {
+	snap.Kind = "Migration"
+	snap.APIVersion = stork_api.SchemeGroupVersion.String()
+}
+
+// performRuleRecovery terminates potential background commands running pods for
+// all migration objects
+func (m *MigrationController) performRuleRecovery() error {
+	migrations, err := k8s.Instance().ListMigrations(v1.NamespaceAll)
+	if err != nil {
+		logrus.Errorf("Failed to list all migrations during rule recovery: %v", err)
+		return err
+	}
+
+	if migrations == nil {
+		return nil
+	}
+
+	var lastError error
+	for _, migration := range migrations.Items {
+		setKind(&migration)
+		err := rule.PerformRuleRecovery(&migration)
+		if err != nil {
+			lastError = err
+		}
+	}
+	return lastError
 }
 
 // Handle updates for Migration objects
@@ -111,25 +146,22 @@ func (m *MigrationController) Handle(ctx context.Context, event sdk.Event) error
 			return err
 		}
 
+		// Check whether namespace is allowed to be migrated before each stage
+		// Restrict migration to only the namespace that the object belongs
+		// except for the namespace designated by the admin
+		if !m.namespaceMigrationAllowed(migration) {
+			err := fmt.Errorf("Spec.Namespaces should only contain the current namespace")
+			log.MigrationLog(migration).Errorf(err.Error())
+			m.Recorder.Event(migration,
+				v1.EventTypeWarning,
+				string(stork_api.MigrationStatusFailed),
+				err.Error())
+			return nil
+		}
+
 		switch migration.Status.Stage {
 
-		case stork_api.MigrationStageInitial,
-			stork_api.MigrationStageVolumes:
-			// Restrict migration to only the namespace that the object belongs
-			// except for the namespace designated by the admin
-			if migration.Namespace != m.migrationAdminNamespace {
-				for _, ns := range migration.Spec.Namespaces {
-					if ns != migration.Namespace {
-						err := fmt.Errorf("Spec.Namespaces should only contain the current namespace")
-						log.MigrationLog(migration).Errorf(err.Error())
-						m.Recorder.Event(migration,
-							v1.EventTypeWarning,
-							string(stork_api.MigrationStatusFailed),
-							err.Error())
-						return nil
-					}
-				}
-			}
+		case stork_api.MigrationStageInitial:
 			// Make sure the namespaces exist
 			for _, ns := range migration.Spec.Namespaces {
 				_, err := k8s.Instance().GetNamespace(ns)
@@ -147,9 +179,35 @@ func (m *MigrationController) Handle(ctx context.Context, event sdk.Event) error
 						return err
 					}
 					return nil
-
 				}
 			}
+			// Make sure the rules exist if configured
+			if migration.Spec.PreExecRule != "" {
+				_, err := k8s.Instance().GetRule(migration.Spec.PreExecRule, migration.Namespace)
+				if err != nil {
+					message := fmt.Sprintf("Error getting PreExecRule %v: %v", migration.Spec.PreExecRule, err)
+					log.MigrationLog(migration).Errorf(message)
+					m.Recorder.Event(migration,
+						v1.EventTypeWarning,
+						string(stork_api.MigrationStatusFailed),
+						message)
+					return nil
+				}
+			}
+			if migration.Spec.PostExecRule != "" {
+				_, err := k8s.Instance().GetRule(migration.Spec.PostExecRule, migration.Namespace)
+				if err != nil {
+					message := fmt.Sprintf("Error getting PostExecRule %v: %v", migration.Spec.PreExecRule, err)
+					log.MigrationLog(migration).Errorf(message)
+					m.Recorder.Event(migration,
+						v1.EventTypeWarning,
+						string(stork_api.MigrationStatusFailed),
+						message)
+					return nil
+				}
+			}
+			fallthrough
+		case stork_api.MigrationStageVolumes:
 
 			err := m.migrateVolumes(migration)
 			if err != nil {
@@ -159,8 +217,14 @@ func (m *MigrationController) Handle(ctx context.Context, event sdk.Event) error
 					v1.EventTypeWarning,
 					string(stork_api.MigrationStatusFailed),
 					message)
-				return err
+				return fmt.Errorf("%v", message)
 			}
+		case stork_api.MigrationStagePreExecRule:
+			m.Recorder.Event(migration,
+				v1.EventTypeNormal,
+				string(stork_api.MigrationStatusInProgress),
+				fmt.Sprintf("Waiting for PreExecRule %v", migration.Spec.PreExecRule))
+			return nil
 		case stork_api.MigrationStageApplications:
 			err := m.migrateResources(migration)
 			if err != nil {
@@ -183,6 +247,19 @@ func (m *MigrationController) Handle(ctx context.Context, event sdk.Event) error
 	return nil
 }
 
+func (m *MigrationController) namespaceMigrationAllowed(migration *stork_api.Migration) bool {
+	// Restrict migration to only the namespace that the object belongs
+	// except for the namespace designated by the admin
+	if migration.Namespace != m.migrationAdminNamespace {
+		for _, ns := range migration.Spec.Namespaces {
+			if ns != migration.Namespace {
+				return false
+			}
+		}
+	}
+	return true
+}
+
 func (m *MigrationController) migrateVolumes(migration *stork_api.Migration) error {
 	storageStatus, err := getClusterPairStorageStatus(migration.Spec.ClusterPair, migration.Namespace)
 	if err != nil {
@@ -191,6 +268,32 @@ func (m *MigrationController) migrateVolumes(migration *stork_api.Migration) err
 
 	if storageStatus != stork_api.ClusterPairStatusReady {
 		return fmt.Errorf("Storage Cluster pair is not ready. Status: %v", storageStatus)
+	}
+
+	var terminationChannels []chan bool
+	if migration.Status.Stage != stork_api.MigrationStageVolumes &&
+		migration.Spec.PreExecRule != "" {
+		migration.Status.Stage = stork_api.MigrationStagePreExecRule
+		migration.Status.Status = stork_api.MigrationStatusInProgress
+		err = sdk.Update(migration)
+		if err != nil {
+			return err
+		}
+		terminationChannels, err = m.runPreExecRule(migration)
+		if err != nil {
+			message := fmt.Sprintf("Error running PreExecRule: %v", err)
+			log.MigrationLog(migration).Errorf(message)
+			m.Recorder.Event(migration,
+				v1.EventTypeWarning,
+				string(stork_api.MigrationStatusFailed),
+				message)
+			return fmt.Errorf("%v", message)
+		}
+		defer func() {
+			for _, channel := range terminationChannels {
+				channel <- true
+			}
+		}()
 	}
 
 	migration.Status.Stage = stork_api.MigrationStageVolumes
@@ -208,6 +311,26 @@ func (m *MigrationController) migrateVolumes(migration *stork_api.Migration) err
 		err = sdk.Update(migration)
 		if err != nil {
 			return err
+		}
+
+		// Terminate any background rules that were started
+		for _, channel := range terminationChannels {
+			channel <- true
+		}
+		terminationChannels = nil
+
+		// Run any post exec rules once migration is triggered
+		if migration.Spec.PostExecRule != "" {
+			err = m.runPostExecRule(migration)
+			if err != nil {
+				message := fmt.Sprintf("Error running PostExecRule: %v", err)
+				log.MigrationLog(migration).Errorf(message)
+				m.Recorder.Event(migration,
+					v1.EventTypeWarning,
+					string(stork_api.MigrationStatusFailed),
+					message)
+				return fmt.Errorf("%v", message)
+			}
 		}
 	}
 
@@ -281,6 +404,46 @@ func (m *MigrationController) migrateVolumes(migration *stork_api.Migration) err
 	err = sdk.Update(migration)
 	if err != nil {
 		return err
+	}
+	return nil
+}
+
+func (m *MigrationController) runPreExecRule(migration *stork_api.Migration) ([]chan bool, error) {
+	terminationChannels := make([]chan bool, 0)
+	for _, ns := range migration.Spec.Namespaces {
+		r, err := k8s.Instance().GetRule(migration.Spec.PreExecRule, ns)
+		if err != nil {
+			for _, channel := range terminationChannels {
+				channel <- true
+			}
+			return nil, err
+		}
+
+		ch, err := rule.ExecuteRule(r, rule.PreExecRule, migration, ns)
+		if err != nil {
+			for _, channel := range terminationChannels {
+				channel <- true
+			}
+			return nil, fmt.Errorf("Error executing PreExecRule for namespace %v: %v", ns, err)
+		}
+		if ch != nil {
+			terminationChannels = append(terminationChannels, ch)
+		}
+	}
+	return terminationChannels, nil
+}
+
+func (m *MigrationController) runPostExecRule(migration *stork_api.Migration) error {
+	for _, ns := range migration.Spec.Namespaces {
+		r, err := k8s.Instance().GetRule(migration.Spec.PostExecRule, ns)
+		if err != nil {
+			return err
+		}
+
+		_, err = rule.ExecuteRule(r, rule.PostExecRule, migration, ns)
+		if err != nil {
+			return fmt.Errorf("Error executing PreExecRule for namespace %v: %v", ns, err)
+		}
 	}
 	return nil
 }

@@ -47,6 +47,10 @@ required = [
   name = "github.com/portworx/sched-ops"
 
 [[constraint]]
+  branch = "add_tasks"
+  name = "github.com/portworx/torpedo"
+
+[[constraint]]
   name = "github.com/heptio/ark"
   branch = "master"
 
